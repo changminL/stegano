@@ -284,6 +284,13 @@ def train(opt, train_loader, epoch, voc, embedding, text_train_dataset, Hnet, Rn
         errR = criterion(rev_secret_img, secret_textv)
         #-----------------------------------------------------------------------------------------------------------------------------
         distance = cosinesimilarity(rev_secret_img, secret_textv)
+        cos = nn.CosineSimilarity(dim=2).cuda()
+        prob = torch.tensor(0)
+        for batch in range(32):
+            for words in range(768):
+                prob.add_(-torch.log(torch.div( torch.exp(100*distance[batch][words]),
+                torch.sum(torch.exp(100*cos(rev_secret_img[batch][words].repeat(voc.num_words).view(voc.num_words, 256), embedding.weight))))))
+        errR = prob.cuda()
         #-----------------------------------------------------------------------------------------------------------------------------
         Rlosses.update(errR, this_batch_size) # record R_loss value
 
