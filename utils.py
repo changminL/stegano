@@ -18,6 +18,29 @@ import collections
 import warnings
 import torchvision.utils as vutils
 
+def normalizing(x, dim):
+    norm = torch.sqrt(torch.sum(torch.pow(x, 2), dim=dim, keepdim=True))
+    normalized = torch.div(x, norm)
+    return normalized
+
+def gather_nd(params, indices):
+    params_size = list(params.size())
+
+    assert len(indices.size()) == 2
+    assert len(params_size) >= indices.size(1)
+
+    indices = indices.t().long()
+    ndim = indices.size(0)
+    idx = torch.zeros_like(indices[0]).long()
+    m = 1
+
+    for i in range(ndim)[::-1]:
+        idx += indices[i] * m
+        m *= params.size(i)
+
+    params = params.reshape((-1, *tuple(torch.tensor(params.size()[ndim:]))))
+    return params[idx]
+
 # custom weight initialization called on netG and netD
 def weights_init(model):
     classname = model.__class__.__name__
@@ -69,19 +92,30 @@ def save_current_codes(dest_path):
     new_utils_dir_path = dest_path + "/utils/"
     shutil.copytree(utils_dir, new_utils_dir_path)
 
-def save_result_pic(opt, this_batch_size, originalLabelv, ContainerImg, secretLabelv, RevSecImg, epoch, i, save_path):
+def save_result_pic(opt, this_batch_size, originalLabelv, ContainerImg, epoch, i, save_path):
     if not opt.debug:
         originalFrames = originalLabelv.resize_(this_batch_size, 3, opt.imagesize, opt.imagesize)
         containerFrames = ContainerImg.resize_(this_batch_size, 3, opt.imagesize, opt.imagesize)
-        secretFrames = secretLabelv.resize_(this_batch_size, 3, opt.imagesize, opt.imagesize)
-        revSecFrames = RevSecImg.resize_(this_batch_size, 3, opt.imagesize, opt.imagesize)
+
+        #resi_ori = originalFrames.resize_(this_batch_size, 3, opt.imagesize * opt.imagesize)
+        #resi_con = containerFrames.resize_(this_batch_size, 3, opt.imagesize * opt.imagesize)
+        resi = torch.sqrt(torch.pow(torch.sub(originalFrames, containerFrames), 2))
+
+        resi5x = 5 * resi
+        resi10x = 10 * resi
+        apd = torch.mean(resi)
+        #secretFrames = secretLabelv.resize_(this_batch_size, 3, opt.imagesize, opt.imagesize)
+        #revSecFrames = RevSecImg.resize_(this_batch_size, 3, opt.imagesize, opt.imagesize)
 
         showContainer = torch.cat([originalFrames, containerFrames], 0)
-        showReveal = torch.cat([secretFrames, revSecFrames], 0)
+        showReveal = torch.cat([resi5x, resi10x], 0)
         # resultImg contains four rows, each row is coverImg containerImg secretImg RevSecImg, total this_batch_size columns
         resultImg = torch.cat([showContainer, showReveal], 0)
         resultImgName = '%s/ResultPics_epoch%03d_batch%04d.png' % (save_path, epoch, i)
-        vutils.save_image(resultImg, resultImgName, nrow=this_batch_size, padding=1, normalize=True)
+        residualImgName = '%s/ResidualAdded_epoch%03d_batch%04d.png' %(save_path, epoch, i)
+        vutils.save_image(resultImg, residualImgName, nrow=this_batch_size, padding=1, normalize=True)
+        vutils.save_image(showContainer, resultImgName, nrow=this_batch_size, padding=1, normalize=True)
+        return apd
 
 def create_dir_to_save_result(opt):
     if not opt.debug:
@@ -90,6 +124,7 @@ def create_dir_to_save_result(opt):
             experiment_dir = opt.hostname + "_" + cur_time + opt.remark
             opt.outckpts += experiment_dir + "/checkPoints"
             opt.trainpics += experiment_dir + "/trainPics"
+            opt.traintexts += experiment_dir + "/trainTexts"
             opt.validationpics += experiment_dir + "/validationPics"
             opt.outlogs += experiment_dir + "/trainingLogs"
             opt.outcodes += experiment_dir + "/codes"
@@ -98,6 +133,8 @@ def create_dir_to_save_result(opt):
                 os.makedirs(opt.outckpts)
             if not os.path.exists(opt.trainpics):
                 os.makedirs(opt.trainpics)
+            if not os.path.exists(opt.traintexts):
+                os.makedirs(opt.traintexts)
             if not os.path.exists(opt.validationpics):
                 os.makedirs(opt.validationpics)
             if not os.path.exists(opt.outlogs):

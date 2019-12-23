@@ -23,7 +23,7 @@ from model import UnetGenerator
 from model import RevealNet
 from text_data import *
 from utils import *
-import pdb
+import nltk
 
 DATA_DIR = '/media/changmin/mini_hard/ImageNet/'
 TEXT_DATA_DIR = "/home/changmin/research/steganography/data/"
@@ -33,7 +33,7 @@ parser.add_argument('--dataset', default="train",
                     help='train | val | test')
 parser.add_argument('--workers', type=int, default=8,
                     help='number of data loading workers')
-parser.add_argument('--batchsize', type=int, default=32,
+parser.add_argument('--batchsize', type=int, default=4,
                     help='input batch size')
 parser.add_argument('--imagesize', type=int, default=256,
                     help='the number of frames')
@@ -53,6 +53,8 @@ parser.add_argument('--Hnet', default='',
                     help="path to Hidingnet (to continue training)")
 parser.add_argument('--Rnet', default='',
                     help="path to Revealnet (to continue training)")
+parser.add_argument('--embedding', default='',
+                    help="path to embedding (to continue training)")
 parser.add_argument('--trainpics', default='./training/',
                     help='folder to output training images')
 parser.add_argument('--validationpics', default='./training/',
@@ -61,11 +63,13 @@ parser.add_argument('--testpics', default='./training/',
                     help='folder to output test images')
 parser.add_argument('--outckpts', default='./training/',
                     help='folder to output checkpoints')
+parser.add_argument('--traintexts', default='./training/',
+                    help='folder to output training texts')
 parser.add_argument('--outlogs', default='./training/',
                     help='folder to output images')
 parser.add_argument('--outcodes', default='./training/',
                     help='folder to save the experiment codes')
-parser.add_argument('--beta', type=float, default=0.75,
+parser.add_argument('--beta', type=float, default=0.01,
                     help='hyper parameter of beta')
 parser.add_argument('--remark', default='', help='comment')
 parser.add_argument('--test', default='', help='test mode, you need give the test pics dirs in this param')
@@ -74,6 +78,7 @@ parser.add_argument('--hostname', default=socket.gethostname(), help='the host n
 parser.add_argument('--debug', type=bool, default=False, help='debug mode do not create folders')
 parser.add_argument('--logfrequency', type=int, default=10, help='the frequency of print the log on the console')
 parser.add_argument('--resultpicfrequency', type=int, default=100, help='the frequency of save the resultpic')
+parser.add_argument('--savefrequency', type=int, default=1000, help='the frequency of save the checkpoint')
 
 def main():
     global writer, smallestLoss, optimizerH, optimizerR, schedulerH, schedulerR
@@ -99,10 +104,11 @@ def main():
         # tensorboardX writer
         writer = SummaryWriter(comment='**' + opt.remark)
         # Get the dataset
-        traindir = os.path.join(DATA_DIR, 'train')
+        #traindir = os.path.join(DATA_DIR, 'train')
         texttraindir = os.path.join(TEXT_DATA_DIR, "train/dialogues_train.txt")
         valdir = os.path.join(DATA_DIR, 'val')
         textvaldir = os.path.join(TEXT_DATA_DIR, "validation/dialogues_validation.txt")
+        """
         train_dataset = MyImageFolder(
             traindir, # Preprocessing the data
             transforms.Compose([
@@ -112,6 +118,7 @@ def main():
                 # a torch.FloatTensor with a shape of [C,H,W] and a value of [0, 1.0] torch.FloatTensor
             ]),
             True)
+        """
         _, text_train_dataset = loadPrepareData(None, "train", texttraindir, 768)
         val_dataset = MyImageFolder(
             valdir, # Preprocessing the data
@@ -122,7 +129,7 @@ def main():
                 # a torch.FloatTensor with a shape of [C,H,W] and a value of [0, 1.0] torch.FloatTensor
             ]))
         _, text_val_dataset = loadPrepareData(None, "val", textvaldir, 768)
-        assert train_dataset
+        #assert train_dataset
         assert val_dataset
         assert text_train_dataset
         assert text_val_dataset
@@ -168,8 +175,9 @@ def main():
         Rnet = torch.nn.DataParallel(Rnet).cuda()
     print_network(opt, Rnet, logpath)
 
-    # CosineSimilarity
-    cosinesimilarity = nn.CosineSimilarity(dim=4).cuda()
+    # LogSoftmax
+    logsoftmax = nn.LogSoftmax(dim=-1).cuda()
+
     # Mean Square Error loss
     criterion = nn.MSELoss().cuda()
     # training mode
@@ -181,8 +189,8 @@ def main():
         optimizerR = optim.Adam(Rnet.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
         schedulerR = ReduceLROnPlateau(optimizerR, mode='min', factor=0.2, patience=8, verbose=True)
 
-        train_loader = DataLoader(train_dataset, batch_size=opt.batchsize,
-                                  shuffle=True, num_workers=int(opt.workers))
+        #train_loader = DataLoader(train_dataset, batch_size=opt.batchsize,
+        #                          shuffle=True, num_workers=int(opt.workers))
         val_loader = DataLoader(val_dataset, batch_size=opt.batchsize,
                                 shuffle=True, num_workers=int(opt.workers))
         smallestLoss = 10000
@@ -190,12 +198,12 @@ def main():
 
         for epoch in range(opt.epochs):
             # train
-            train(opt, train_loader, epoch, voc, text_train_dataset, Hnet=Hnet, Rnet=Rnet,
-                  criterion=criterion, cosinesimilarity=cosinesimilarity, logpath=logpath)
+            train(opt, val_loader, epoch, voc, embedding, text_train_dataset, Hnet=Hnet, Rnet=Rnet,
+                  criterion=criterion, logsoftmax=logsoftmax, logpath=logpath)
 
             # validation
             val_hloss, val_rloss, val_sumloss = validation(opt, val_loader, epoch, voc, text_val_dataset,
-                                                           Hnet=Hnet, Rnet=Rnet, criterion=criterion, logpath=logpath)
+                                                           Hnet=Hnet, Rnet=Rnet, criterion=criterion, logsoftmax=logsoftmax, logpath=logpath)
 
             # adjust learning rate
             schedulerH.step(val_sumloss)
@@ -221,7 +229,7 @@ def main():
         test(opt, test_loader, 0, Hnet=Hnet, Rnet=Rnet, criterion=criterion, logpath=logpath)
         print("-------------------Test is completed-------------------")
 
-def train(opt, train_loader, epoch, voc, embedding, text_train_dataset, Hnet, Rnet, criterion, cosinesimilarity, logpath):
+def train(opt, train_loader, epoch, voc, embedding, text_train_dataset, Hnet, Rnet, criterion, logsoftmax, logpath):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     Hlosses = AverageMeter() # record the loss of each epoch Hnet
@@ -251,13 +259,15 @@ def train(opt, train_loader, epoch, voc, embedding, text_train_dataset, Hnet, Rn
         #secret_img = all_pics[this_batch_size:this_batch_size * 2, :, :, :]
         text_batches = batch2TrainData(voc, [random.choice(text_train_dataset) for _ in range(this_batch_size)])
         secret_text, text_lengths, target_text, mask, max_target_len = text_batches
+        org_text = secret_text
+        secret_text = secret_text.cuda()
         secret_text = embedding(secret_text)
         secret_text = secret_text.view(this_batch_size, 3, 256, 256)
         #--------------------------------------------------------------------------------------------------------------------------------
 
 
         # Concat the pictures together to get six-channel pictures as input to the Hnet
-        concat_img_text = torch.cat([cover_img, secret_text], dim=1)
+        concat_img_text = torch.cat([cover_img.cuda(), secret_text], dim=1)
 
         # Data into gpu
         if opt.cuda:
@@ -277,20 +287,41 @@ def train(opt, train_loader, epoch, voc, embedding, text_train_dataset, Hnet, Rn
         Hlosses.update(errH, this_batch_size) # record H_loss value
 
         rev_secret_img = Rnet(container_img) # container_img is used as input to the Rnet to get rev_secret_img
+        #import pdb
+        #pdb.set_trace()
         #secret_imgv = Variable(secret_img) # secret_img as the label of the Rnet
         secret_textv = Variable(secret_text)
 
         #errR = criterion(rev_secret_img, secret_imgv) # Rnet reconstruction error
-        errR = criterion(rev_secret_img, secret_textv)
+        #errR = criterion(rev_secret_img, secret_textv)
         #-----------------------------------------------------------------------------------------------------------------------------
-        distance = cosinesimilarity(rev_secret_img, secret_textv)
-        cos = nn.CosineSimilarity(dim=2).cuda()
-        prob = torch.tensor(0)
-        for batch in range(32):
-            for words in range(768):
-                prob.add_(-torch.log(torch.div( torch.exp(100*distance[batch][words]),
-                torch.sum(torch.exp(100*cos(rev_secret_img[batch][words].repeat(voc.num_words).view(voc.num_words, 256), embedding.weight))))))
-        errR = prob.cuda()
+        #import pdb
+        #pdb.set_trace()
+        rec_text = rev_secret_img.view(this_batch_size, 768, 256)
+
+        rec_text_norm = normalizing(rec_text, 2)
+
+        W_norm = normalizing(embedding.weight, 1)
+
+        text_org = org_text.view(-1)
+
+        prob_logits = torch.tensordot(torch.squeeze(rec_text_norm), W_norm, dims=[[2], [1]])
+
+        prob = logsoftmax(prob_logits * 100)
+        rec_sent = torch.squeeze(torch.argmax(prob, dim=2))
+        prob = prob.view(-1, voc.num_words)
+
+        idx = torch.arange(this_batch_size * 768)
+
+        all_idx = torch.t(torch.stack([idx, text_org]))
+
+        all_prob = gather_nd(prob, all_idx)
+
+        gen_temp = rec_sent.view(-1)
+        gen_idx = torch.t(torch.stack([idx, gen_temp.cpu()]))
+        gen_prob = gather_nd(prob, gen_idx)
+
+        errR = -torch.mean(all_prob)
         #-----------------------------------------------------------------------------------------------------------------------------
         Rlosses.update(errR, this_batch_size) # record R_loss value
 
@@ -322,17 +353,57 @@ def train(opt, train_loader, epoch, voc, embedding, text_train_dataset, Hnet, Rn
 
         # Related operations such as storing records
         # Generate a picture in 100 steps
+
         if epoch % 1 == 0 and i % opt.resultpicfrequency == 0:
-            save_result_pic(opt, this_batch_size, cover_img, container_img.data, secret_img, rev_secret_img.data, epoch, i,
-                            opt.trainpics)
+
+            APD = save_result_pic(opt, this_batch_size, cover_img, container_img.data, epoch, i, opt.trainpics)
+            save_text_path = opt.traintexts + '/ResultTexts_epoch%03d_batch%04d.txt' % (epoch, i)
+            #import pdb
+            #pdb.set_trace()
+            avg_bleu = 0
+            with open(save_text_path, 'a') as text_file:
+
+                for b in range(this_batch_size):
+                    ori = [voc.index2word[x] for x in org_text[b].tolist() if x != 0]
+                    recon = [voc.index2word[x] for x in rec_sent[b].tolist() if x != 0]
+                    original_text = "{}_Original     :".format(b) + " ".join([voc.index2word[x] for x in org_text[b].tolist() if x != 0])
+                    recons_text = "{}_Reconstructed:".format(b) + " ".join([voc.index2word[x] for x in rec_sent[b].tolist() if x != 0])
+                    text_file.write(original_text + "\n")
+                    text_file.write(recons_text + "\n")
+                    bleu_score = nltk.translate.bleu_score.sentence_bleu([ori], recon)
+                    text_file.write(str(bleu_score) + "\n")
+                    avg_bleu += bleu_score
+                apd_text = "APD: {}".format(APD) + "\n"
+                text_file.write(apd_text)
+            avg_bleu = avg_bleu / float(this_batch_size)
+            print("Original     :" + " ".join([voc.index2word[x] for x in org_text[0].tolist() if x != 0]))
+            print()
+            print("Reconstructed:" + " ".join([voc.index2word[x] for x in rec_sent[0].tolist() if x != 0]))
+            print("Bleu score   :{}".format(avg_bleu))
+
+        if i % opt.savefrequency == 0 and i != 0:
+            torch.save({
+                'epoch': epoch,
+                'iteration': i,
+                'Hnet': Hnet.state_dict(),
+                'Rnet': Rnet.state_dict(),
+                'optimizerH': optimizerH.state_dict(),
+                'optimizerR': optimizerR.state_dict(),
+                'sum_loss': err_sum,
+                'H_loss': errH,
+                'R_loss': errR,
+                'voc_dict': voc.__dict__,
+                'embedding': embedding.state_dict()
+            }, opt.outckpts + '/{}_{}_{}.tar'.format(epoch, i, 'checkpoint'))
 
     # Time taken to output an epoch
+    """
     epoch_log = "one epoch time is %.4f==================================================" % (
         batch_time.sum) + "\n"
     epoch_log = epoch_log + "epoch learning rate: optimizerH_lr = %.8f    optimizerR_lr = %.8f" % (
         Hlosses.avg, Rlosses.avg, SumLosses.avg)
     print_log(opt, epoch_log, logpath)
-
+    """
     if not opt.debug:
         # record learning rate
         writer.add_scalar("lr/H_lr", optimizerH.param_groups[0]['lr'], epoch)
@@ -343,49 +414,83 @@ def train(opt, train_loader, epoch, voc, embedding, text_train_dataset, Hnet, Rn
         writer.add_scalar("train/H_loss", Hlosses.avg, epoch)
         writer.add_scalar("train/sum_loss", SumLosses.avg, epoch)
 
-def validation(opt, val_loader, epoch, voc, text_val_dataset, Hnet, Rnet, criterion, logpath):
+def validation(opt, val_loader, epoch, voc, text_val_dataset, Hnet, Rnet, criterion, logsoftmax, logpath):
     print("--------------------------------------------------validation begin--------------------------------------------------")
     start_time = time.time()
     Hnet.eval()
     Rnet.eval()
     Hlosses = AverageMeter() # record the loss of each epoch Hnet
     Rlosses = AverageMeter() # record the loss of each epoch Rnet
+    count = 0
     for i, data in enumerate(val_loader, 0):
+        if count >= 100:
+            break
         Hnet.zero_grad()
         Rnet.zero_grad()
         with torch.no_grad():
             all_pics = data # allpics contains coverImg and secretImg, no label needed
-            this_batch_size = int(all_pics.size()[0] / 2) # Processing the last batch of each epoch may be insufficient for opt.batchsize
+            this_batch_size = int(all_pics.size()[0]) # Processing the last batch of each epoch may be insufficient for opt.batchsize
 
             # The first half of the picture is used as coverImg, and the second half of the picture is used as secretImg
-            cover_img = all_pics[0:this_batch_size, :, :, :] # batchsize, 3, 256, 256
-            secret_img = all_pics[this_batch_size:this_batch_size * 2, :, :, :]
+            cover_img = all_pics # batchsize, 3, 256, 256
+            #secret_img = all_pics[this_batch_size:this_batch_size * 2, :, :, :]
+            text_batches = batch2TrainData(voc, [random.choice(text_val_dataset) for _ in range(this_batch_size)])
+            secret_text, text_lengths, target_text, mask, max_target_len = text_batches
+            org_text = secret_text
+            secret_text = secret_text.cuda()
+            secret_text = embedding(secret_text)
+            secret_text = secret_text.view(this_batch_size, 3, 256, 256)
 
             # Concat the pictures together to get six-channel pictures as input to the Hnet
-            concat_img = torch.cat([cover_img, secret_img], dim=1)
+            #concat_img = torch.cat([cover_img, secret_img], dim=1)
+            concat_img_text = torch.cat([cover_img.cuda(), secret_text], dim=1)
 
             # Data into gpu
             if opt.cuda:
                 cover_img = cover_img.cuda()
-                secret_img = secret_img.cuda()
-                concat_img = concat_img.cuda()
+                #secret_img = secret_img.cuda()
+                #concat_img = concat_img.cuda()
+                concat_img_text = concat_img_text.cuda()
 
-            concat_imgv = Variable(concat_img) # concat_img as input to the Hnet
+            #concat_imgv = Variable(concat_img) # concat_img as input to the Hnet
+            concat_img_textv = Variable(concat_img_text)
             cover_imgv = Variable(cover_img) # cover_img as label of Hnet
 
-            container_img = Hnet(concat_imgv) # Get container_img with secret_img
+            container_img = Hnet(concat_img_textv) # Get container_img with secret_img
             errH = criterion(container_img, cover_imgv) # Hnet reconstruction error
             Hlosses.update(errH, this_batch_size) # record H_loss value
 
             rev_secret_img = Rnet(container_img) # container_img is used as input to the Rnet to get rev_secret_img
-            secret_imgv = Variable(secret_img) # secret_img as the label of the Rnet
-            errR = criterion(rev_secret_img, secret_imgv) # Rnet reconstruction error
-            Rlosses.update(errR, this_batch_size) # record R_loss value
 
+            secret_textv = Variable(secret_text)
+
+            rec_text = rev_secret_img.view(this_batch_size, 768, 256)
+
+            rec_text_norm = normalizing(rec_text, 2)
+
+            W_norm = normalizing(embedding.weight, 1)
+
+            text_org = org_text.view(-1)
+
+            prob_logits = torch.tensordot(torch.squeeze(rec_text_norm), W_norm, dims=[[2], [1]])
+
+            prob = logsoftmax(prob_logits * 100)
+            prob = prob.view(-1, voc.num_words)
+
+            idx = torch.arange(this_batch_size * 768)
+
+            all_idx = torch.t(torch.stack([idx, text_org]))
+
+            all_prob = gather_nd(prob, all_idx)
+
+            errR = -torch.mean(all_prob) # Rnet reconstruction error
+            Rlosses.update(errR, this_batch_size) # record R_loss value
+            """
             if i % 50 == 0:
                 save_result_pic(opt, this_batch_size, cover_img, container_img.data, secret_img, rev_secret_img.data, epoch, i,
                                 opt.validationpics)
-
+            """
+            count += 1
     val_hloss = Hlosses.avg
     val_rloss = Rlosses.avg
     val_sumloss = val_hloss + opt.beta * val_rloss
